@@ -2,20 +2,11 @@ import streamlit as st
 import ccxt
 import pandas as pd
 import pandas_ta as ta
-import time
+from streamlit_autorefresh import st_autorefresh
 
-# --- 1. SETUP & THEME ---
-st.set_page_config(page_title="MEXC Diamond & Meme Radar", layout="wide")
-
-# Mobile-friendly UI enhancement
-st.markdown("""
-    <style>
-    .stDataFrame { border: 2px solid #00FF85; border-radius: 10px; }
-    h1 { color: #00FF85; font-size: 1.8rem !important; }
-    </style>
-""", unsafe_allow_html=True)
-
-TIMEFRAMES = ['3m', '5m', '15m', '1h', '4h']
+# --- MOBILE CONFIG & AUTO-REFRESH ---
+st.set_page_config(page_title="MEXC 1m Radar", layout="wide")
+count = st_autorefresh(interval=60000, key="mexc_heartbeat")
 
 @st.cache_resource
 def init_mexc():
@@ -23,83 +14,42 @@ def init_mexc():
 
 mexc = init_mexc()
 
-# --- 2. MEME DETECTION LIST ---
-MEME_KEYWORDS = [
-    'PEPE', 'DOGE', 'SHIB', 'BONK', 'WIF', 'FLOKI', 'INU', 'MEME', 
-    'BULL', 'CAT', 'MOG', 'PENGU', 'GOAT', 'BABY', 'TRUMP', 'BRETT'
-]
+def get_mexc_link(symbol):
+    pair = symbol.replace("/", "_")
+    url = f"https://www.mexc.com/exchange/{pair}"
+    return f'<a href="{url}" target="_blank" style="text-decoration: none; background-color: #00FF85; color: black; padding: 5px 10px; border-radius: 8px; font-weight: bold;">⚡ TRADE</a>'
 
-# --- 3. THE ANALYZER ---
-def get_signal(symbol, tf):
+def analyze_market(symbol, tf):
     try:
         ohlcv = mexc.fetch_ohlcv(symbol, timeframe=tf, limit=210)
         df = pd.DataFrame(ohlcv, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
-        df['sma20'] = ta.sma(df['c'], 20)
-        df['sma200'] = ta.sma(df['c'], 200)
+        sma20, sma200 = ta.sma(df['c'], 20), ta.sma(df['c'], 200)
+        vwap = ta.vwap(df['h'], df['l'], df['c'], df['v']).iloc[-1]
+        curr_p = df['c'].iloc[-1]
         
-        curr = df.iloc[-1]
-        prev = df.iloc[-2]
+        ob = mexc.fetch_order_book(symbol, limit=20)
+        bids, asks = sum([b[1] for b in ob['bids']]), sum([a[1] for a in ob['asks']])
+        opp_ratio = bids / asks if asks > 0 else 10
         
-        if prev['sma20'] < prev['sma200'] and curr['sma20'] > curr['sma200']:
-            return "💎 GOLD"
-        if prev['sma20'] > prev['sma200'] and curr['sma20'] < prev['sma200']:
-            return "🛑 DEATH"
-        if abs(curr['sma20'] - curr['sma200']) / curr['sma200'] < 0.003:
-            return "🌀 SQZ"
-        
-        return "📈 BULL" if curr['c'] > curr['sma200'] else "📉 BEAR"
-    except:
-        return "-"
+        gap = ((curr_p - vwap) / vwap) * 100
+        sig = "·"
+        if sma20.iloc[-2] < sma200.iloc[-2] and sma20.iloc[-1] > sma200.iloc[-1]: sig = "💎 GOLD"
+        elif sma20.iloc[-2] > sma200.iloc[-2] and sma20.iloc[-1] < sma200.iloc[-1]: sig = "💀 DEATH"
+        elif abs(sma20.iloc[-1] - sma200.iloc[-1]) / sma200.iloc[-1] < 0.003: sig = "🌀 SQZ"
 
-# --- 4. MAIN UI ---
-st.title("💎 Diamond Master Radar")
+        return sig, round(gap, 2), round(opp_ratio, 1)
+    except: return "err", 0, 1
 
-# THE TOGGLE SWITCH
-is_meme_mode = st.toggle("🐾 Meme Only Mode", value=False)
+# --- UI DISPLAY ---
+btc = mexc.fetch_ticker('BTC/USDT')
+st.subheader(f"Market Bias: {'🔥 BULL' if btc['last'] > 95000 else '⚠️ CAUTION'} | BTC: ${btc['last']:,.0f}")
 
-if st.button("🔄 Start Full Market Scan"):
-    # Fetch Top 150 by Volume
-    tickers = mexc.fetch_tickers()
-    df_t = pd.DataFrame.from_dict(tickers, orient='index')
-    df_t = df_t[df_t['symbol'].str.contains('/USDT')]
-    top_coins = df_t.sort_values(by='quoteVolume', ascending=False).head(150)['symbol'].tolist()
-    
-    results = []
-    progress_bar = st.progress(0, text="Analyzing Markets...")
-    
-    for i, symbol in enumerate(top_coins):
-        clean_name = symbol.split('/')[0]
-        is_meme = any(meme in clean_name for meme in MEME_KEYWORDS)
-        
-        # Filtering Logic
-        if is_meme_mode and not is_meme:
-            continue
-            
-        row = {"Coin": f"🐾 {clean_name}" if is_meme else clean_name}
-        for tf in TIMEFRAMES:
-            row[tf] = get_signal(symbol, tf)
-        
-        results.append(row)
-        progress_bar.progress((i + 1) / len(top_coins))
-        time.sleep(0.01) # Fast scan
-    
-    # Display results
-    if results:
-        df_final = pd.DataFrame(results)
-        
-        def apply_colors(val):
-            if val == "💎 GOLD": return 'color: #00FF85; font-weight: bold'
-            if val == "🛑 DEATH": return 'color: #FF3131'
-            if val == "🌀 SQZ": return 'color: #FFA500'
-            if val == "📈 BULL": return 'color: #2E7D32'
-            if val == "📉 BEAR": return 'color: #C62828'
-            return 'color: white'
+tickers = mexc.fetch_tickers()
+top_symbols = sorted([s for s in tickers.keys() if '/USDT' in s], key=lambda x: tickers[x]['quoteVolume'], reverse=True)[:30]
 
-        st.dataframe(
-            df_final.style.map(apply_colors, subset=TIMEFRAMES),
-            height=800, 
-            use_container_width=True, 
-            hide_index=True
-        )
-    else:
-        st.warning("No coins found matching that filter.")
+data = []
+for s in top_symbols:
+    sig, gap, opp = analyze_market(s, '15m')
+    data.append({"Coin": s.replace('/USDT', ''), "Signal": sig, "VWAP Gap%": gap, "Opp. Ratio": opp, "Action": get_mexc_link(s)})
+
+st.write(pd.DataFrame(data).to_html(escape=False, index=False), unsafe_allow_html=True)
